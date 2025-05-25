@@ -1,8 +1,9 @@
 use clap::Parser;
-use dialoguer::theme::ColorfulTheme;
 use dialoguer::Select;
+use dialoguer::theme::ColorfulTheme;
 
-use crate::action::*;
+use crate::ca::*;
+use crate::server::run_service;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -20,14 +21,17 @@ pub enum Commands {
     Update,
 }
 
-
 pub(crate) async fn parse_command(cmd: Commands) {
     match cmd {
         Commands::Run => {
-            run_service().await;
-        },
+            if let Err(err) = run_service().await {
+                log::error!("服务启动失败: {err}");
+            }
+        }
         Commands::Generate => {
-            generate_ca();
+            if let Err(err) = generate_ca() {
+                log::error!("生成证书失败: {err}");
+            }
         }
         Commands::Install => {
             install_ca();
@@ -42,13 +46,7 @@ pub(crate) async fn parse_command(cmd: Commands) {
 }
 
 pub(crate) async fn parse_select() {
-    let options = vec![
-        "Run",
-        "Generate",
-        "Install",
-        "Uninstall",
-        "Update",
-    ];
+    let options = vec!["Run", "Generate", "Install", "Uninstall", "Update"];
 
     let selection = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("请选择操作")
@@ -58,8 +56,16 @@ pub(crate) async fn parse_select() {
         .unwrap();
 
     match options[selection] {
-        "Run" => run_service().await,
-        "Generate" => generate_ca(),
+        "Run" => {
+            if let Err(err) = run_service().await {
+                log::error!("服务启动失败: {err}");
+            }
+        }
+        "Generate" => {
+            if let Err(err) = generate_ca() {
+                log::error!("生成证书失败: {err}");
+            }
+        }
         "Install" => install_ca(),
         "Uninstall" => uninstall_ca(),
         "Update" => update_ca(),

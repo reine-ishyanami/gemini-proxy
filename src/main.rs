@@ -1,11 +1,13 @@
 use clap::Parser;
-use command::{parse_command, parse_select, App};
+use command::{App, parse_command, parse_select};
 
+mod ca;
 mod command;
-mod action;
+mod server;
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
     if let Ok(app) = App::try_parse() {
         parse_command(app.cmd).await;
     } else {
