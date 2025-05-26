@@ -1,7 +1,7 @@
 use clap::Parser;
 use command::{App, parse_command, parse_select};
 
-mod ca;
+mod certificate;
 mod command;
 mod server;
 

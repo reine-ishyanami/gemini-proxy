@@ -26,13 +26,11 @@ pub(crate) fn generate_ca() -> anyhow::Result<()> {
     let pem_serialized = cert.pem();
     let pem = pem::parse(&pem_serialized)?;
     let der_serialized = pem.contents();
-    println!("{pem_serialized}");
-    println!("{}", key_pair.serialize_pem());
     fs::create_dir_all("certs/")?;
-    fs::write("certs/cert.pem", pem_serialized.as_bytes())?;
-    fs::write("certs/cert.der", der_serialized)?;
-    fs::write("certs/key.pem", key_pair.serialize_pem().as_bytes())?;
-    fs::write("certs/key.der", key_pair.serialize_der())?;
+    fs::write("certs/certificate.pem", pem_serialized.as_bytes())?;
+    fs::write("certs/certificate.der", der_serialized)?;
+    fs::write("certs/privatekey.pem", key_pair.serialize_pem().as_bytes())?;
+    fs::write("certs/privatekey.der", key_pair.serialize_der())?;
     Ok(())
 }
 

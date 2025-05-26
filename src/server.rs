@@ -47,7 +47,6 @@ pub(crate) async fn run_service() -> anyhow::Result<()> {
 }
 
 async fn proxy(req: Request<Incoming>) -> anyhow::Result<Response<BoxBody<Bytes, hyper::Error>>> {
-    println!("Received request: {:?}", req);
     if Method::CONNECT == req.method() {
         if let Some(addr) = req.uri().authority().map(|auth| auth.to_string()) {
             // 立即返回一个成功的 Response
@@ -147,44 +146,14 @@ async fn mitm_tunnel(upgraded: Upgraded, addr: String) -> anyhow::Result<()> {
     let connector = TlsConnector::from(Arc::new(client_config));
     let server_tls = connector.connect(server_name, server_tcp).await?;
 
-    // 5. 使用 hyper 处理明文 HTTP 流量
-    async fn handle_decrypted_request(
-        req: Request<Incoming>,
-    ) -> anyhow::Result<Response<BoxBody<Bytes, hyper::Error>>> {
-        println!("Received decrypted request: {:?}", req);
-        println!("Received decrypted request body: {:?}", req.body());
+    // 5. 在客户端和目标服务器之间复制流量
+    let (mut client_reader, mut client_writer) = tokio::io::split(client_tls);
+    let (mut server_reader, mut server_writer) = tokio::io::split(server_tls);
 
-        // 将解密后的请求转发到目标服务器
-        let host = req.uri().host().expect("uri has no host");
-        let port = req.uri().port_u16().unwrap_or(443);
+    let client_to_server = tokio::io::copy(&mut client_reader, &mut server_writer);
+    let server_to_client = tokio::io::copy(&mut server_reader, &mut client_writer);
 
-        let stream = TcpStream::connect((host, port)).await.unwrap();
-        let io = TokioIo::new(stream);
-
-        let (mut sender, conn) = ClientBuilder::new()
-            .preserve_header_case(true)
-            .title_case_headers(true)
-            .handshake(io)
-            .await?;
-        tokio::task::spawn(async move {
-            if let Err(err) = conn.await {
-                println!("Connection failed: {err:?}");
-            }
-        });
-
-        let resp = sender.send_request(req).await?;
-        Ok(resp.map(|b| b.boxed()))
-    }
-
-    if let Err(err) = ServerBuilder::new()
-        .serve_connection(TokioIo::new(client_tls), service_fn(handle_decrypted_request))
-        .await
-    {
-        eprintln!("Failed to serve MITM connection: {err:?}");
-    }
-
-    // 6. 关闭与目标服务器的连接
-    // server_tls 连接将在 serve_connection 结束后自动关闭
+    tokio::try_join!(client_to_server, server_to_client)?;
 
     Ok(())
 }
@@ -195,8 +164,8 @@ pub struct SignResult {
 }
 
 fn sign(domain: &str) -> anyhow::Result<SignResult> {
-    let issuer_key = load_private_key("certs/key.pem")?;
-    let issuer_params = load_certs("certs/cert.pem")?;
+    let issuer_key = load_private_key("certs/privatekey.pem")?;
+    let issuer_params = load_certs("certs/certificate.pem")?;
     let issuer_cert = issuer_params.self_signed(&issuer_key)?;
     let mut params = CertificateParams::new(vec![
         domain.to_owned(),
@@ -208,21 +177,14 @@ fn sign(domain: &str) -> anyhow::Result<SignResult> {
     let key = KeyPair::generate()?;
     let leaf_cert = params.signed_by(&key, &issuer_cert, &issuer_key)?;
 
-    let issuer_cert_pem = issuer_cert.pem();
-    let mut issuer_cert_reader = issuer_cert_pem.as_bytes();
-    let issuer_cert_der = rustls_pemfile::certs(&mut issuer_cert_reader).collect::<Result<Vec<_>, _>>()?;
-
     let cert_pem = leaf_cert.pem();
     let mut cert_reader = cert_pem.as_bytes();
     let cert = rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
     let key_pem = key.serialize_pem();
     let mut key_reader = key_pem.as_bytes();
     let key = rustls_pemfile::private_key(&mut key_reader).map(|key| key.unwrap())?;
-    
-    let mut full_chain = cert.clone();
-    full_chain.extend(issuer_cert_der);
 
-    Ok(SignResult { cert: full_chain, key })
+    Ok(SignResult { cert, key })
 }
 
 fn load_certs(filename: &str) -> anyhow::Result<CertificateParams> {

@@ -2,7 +2,7 @@ use clap::Parser;
 use dialoguer::Select;
 use dialoguer::theme::ColorfulTheme;
 
-use crate::ca::*;
+use crate::certificate::*;
 use crate::server::run_service;
 
 #[derive(Parser, Debug)]
