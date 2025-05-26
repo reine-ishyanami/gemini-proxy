@@ -1,4 +1,3 @@
-use ::pki_types::ServerName;
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{
     body::{Bytes, Incoming},
@@ -6,10 +5,10 @@ use hyper::{
     upgrade::Upgraded,
 };
 use hyper_util::rt::TokioIo;
-use rcgen::{Certificate, CertificateParams, KeyPair};
+use rcgen::{CertificateParams, KeyPair};
 use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
-    pki_types::{CertificateDer, PrivateKeyDer},
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName},
 };
 use std::{
     fs,
@@ -19,15 +18,7 @@ use std::{
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-// use rcgen::{
-//     BasicConstraints, Certificate, CertificateParams, DnType, DnValue::PrintableString,
-//     ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
-// };
-// use time::{Duration, OffsetDateTime};
-
 use http::{Method, Request, Response, StatusCode};
-// use http_body_util::{BodyExt, Full};
-// use pki_types::{CertificateDer, PrivateKeyDer};
 
 type ClientBuilder = hyper::client::conn::http1::Builder;
 type ServerBuilder = hyper::server::conn::http1::Builder;
@@ -39,17 +30,17 @@ pub(crate) async fn run_service() -> anyhow::Result<()> {
     log::info!("代理服务运行中...");
     let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8443);
     let listener = TcpListener::bind(addr).await?;
-    println!("Listening on http://{addr}");
+    println!("Listening on https://{addr}");
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, addr) = listener.accept().await?;
         tokio::spawn(async move {
             if let Err(err) = ServerBuilder::new()
                 .serve_connection(TokioIo::new(stream), service_fn(proxy))
                 .with_upgrades()
                 .await
             {
-                eprintln!("Failed to serve connection: {err:?}");
+                eprintln!("Failed to serve connection from {addr}: {err:?}");
             }
         });
     }
@@ -57,7 +48,6 @@ pub(crate) async fn run_service() -> anyhow::Result<()> {
 
 async fn proxy(req: Request<Incoming>) -> anyhow::Result<Response<BoxBody<Bytes, hyper::Error>>> {
     println!("Received request: {:?}", req);
-    println!("Received request body: {:?}", req.body());
     if Method::CONNECT == req.method() {
         if let Some(addr) = req.uri().authority().map(|auth| auth.to_string()) {
             // 立即返回一个成功的 Response
@@ -85,10 +75,22 @@ async fn proxy(req: Request<Incoming>) -> anyhow::Result<Response<BoxBody<Bytes,
         }
     } else {
         // 普通 HTTP流量直接转发或自定义处理
-        let host = req.uri().host().expect("uri has no host");
-        let port = req.uri().port_u16().unwrap_or(443);
+        let host = req.uri().host().map(|h| h.to_string()).expect("uri has no host");
+        let port = req.uri().port_u16().unwrap_or(80);
+        let mut req = req;
+        let old_uri = req.uri();
+        let need_rewrite = old_uri.scheme().is_some();
+        if need_rewrite {
+            let path_and_query = old_uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+            let new_uri = http::Uri::builder().path_and_query(path_and_query).build().unwrap();
+            // 构造新 request，保留 method、headers、body、version
+            let (parts, body) = req.into_parts();
+            let mut new_parts = parts;
+            new_parts.uri = new_uri;
+            req = Request::from_parts(new_parts, body);
+        }
 
-        let stream = TcpStream::connect((host, port)).await.unwrap();
+        let stream = TcpStream::connect((host.as_str(), port)).await.unwrap();
         let io = TokioIo::new(stream);
 
         let (mut sender, conn) = ClientBuilder::new()
@@ -204,16 +206,23 @@ fn sign(domain: &str) -> anyhow::Result<SignResult> {
     params.is_ca = rcgen::IsCa::NoCa;
     // 你可以在此处加载自己的 CA 证书和密钥进行签名
     let key = KeyPair::generate()?;
-    let cert = params.signed_by(&key, &issuer_cert, &issuer_key)?;
+    let leaf_cert = params.signed_by(&key, &issuer_cert, &issuer_key)?;
 
-    let cert_pem = cert.pem();
+    let issuer_cert_pem = issuer_cert.pem();
+    let mut issuer_cert_reader = issuer_cert_pem.as_bytes();
+    let issuer_cert_der = rustls_pemfile::certs(&mut issuer_cert_reader).collect::<Result<Vec<_>, _>>()?;
+
+    let cert_pem = leaf_cert.pem();
     let mut cert_reader = cert_pem.as_bytes();
     let cert = rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
     let key_pem = key.serialize_pem();
     let mut key_reader = key_pem.as_bytes();
     let key = rustls_pemfile::private_key(&mut key_reader).map(|key| key.unwrap())?;
+    
+    let mut full_chain = cert.clone();
+    full_chain.extend(issuer_cert_der);
 
-    Ok(SignResult { cert, key })
+    Ok(SignResult { cert: full_chain, key })
 }
 
 fn load_certs(filename: &str) -> anyhow::Result<CertificateParams> {

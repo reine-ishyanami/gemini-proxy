@@ -15,6 +15,7 @@ pub(crate) fn generate_ca() -> anyhow::Result<()> {
         .distinguished_name
         .push(DnType::CommonName, "Gemini Proxy");
     params.subject_alt_names = vec![
+        SanType::DnsName("www.bing.com".try_into()?),
         SanType::DnsName("localhost".try_into()?),
         SanType::DnsName("generativelanguage.googleapis.com".try_into()?),
     ];
