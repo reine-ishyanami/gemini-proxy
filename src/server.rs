@@ -20,7 +20,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use http::{Method, Request, Response, StatusCode};
-use log::{info, error};
+use log::{debug, error, info};
 
 use crate::model::config::APP_CONFIG;
 
@@ -75,6 +75,7 @@ pub(crate) async fn run_service() -> anyhow::Result<()> {
 }
 
 async fn proxy(req: Request<Incoming>) -> anyhow::Result<Response<BoxBody<Bytes, hyper::Error>>> {
+    debug!("receive req {:?}", req);
     if Method::CONNECT == req.method() {
         if let Some(addr) = req.uri().authority().map(|auth| auth.to_string()) {
             // 立即返回一个成功的 Response
@@ -174,7 +175,7 @@ async fn mitm_tunnel(upgraded: Upgraded, addr: String) -> anyhow::Result<()> {
     let client_config = ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
-    let server_name = ServerName::try_from(host)?;
+    let server_name = ServerName::try_from(host.clone())?;
     let connector = TlsConnector::from(Arc::new(client_config));
     let server_tls = connector.connect(server_name, server_tcp).await?;
 
@@ -183,44 +184,52 @@ async fn mitm_tunnel(upgraded: Upgraded, addr: String) -> anyhow::Result<()> {
     let (mut server_reader, mut server_writer) = tokio::io::split(server_tls);
 
     // 篡改客户端发送过来的请求内容
-    let client_to_server = async {
-        let mut buf = [0u8; 16 * 1024];
-        loop {
-            let n = client_reader.read(&mut buf).await?;
-            if n == 0 {
-                break;
-            }
-            let mut modified = buf[..n].to_vec();
-            let mut i = 0;
-            while i + 4 < modified.len() {
-                if &modified[i..i + 4] == b"key=" {
-                    // 找到 key=，替换后面的内容
-                    let mut j = i + 4;
-                    while j < modified.len() && modified[j] != b'&' && modified[j] != b' ' && modified[j] != b'\r' && modified[j] != b'\n' {
-                        j += 1;
-                    }
-                    // 将要替换的内容
-                    let replaced = pick_key();
-                    info!("current key: {}", String::from_utf8_lossy(&replaced));
-                    modified.splice(i + 4..j, replaced.iter().cloned());
-                    i = i + 4 + replaced.len();
-                } else {
-                    i += 1;
+    if &host == "generativelanguage.googleapis.com" {
+        let client_to_server = async {
+            let mut buf = [0u8; 16 * 1024];
+            loop {
+                let n = client_reader.read(&mut buf).await?;
+                if n == 0 {
+                    break;
                 }
+                let mut modified = buf[..n].to_vec();
+                let mut i = 0;
+                while i + 4 < modified.len() {
+                    if &modified[i..i + 4] == b"key=" {
+                        // 找到 key=，替换后面的内容
+                        let mut j = i + 4;
+                        while j < modified.len() && modified[j] != b'&' && modified[j] != b' ' && modified[j] != b'\r' && modified[j] != b'\n' {
+                            j += 1;
+                        }
+                        // 将要替换的内容
+                        let replaced = pick_key();
+                        info!("current key: {}", String::from_utf8_lossy(&replaced));
+                        modified.splice(i + 4..j, replaced.iter().cloned());
+                        i = i + 4 + replaced.len();
+                    } else {
+                        i += 1;
+                    }
+                }
+                server_writer.write_all(&modified).await?;
             }
-            server_writer.write_all(&modified).await?;
-        }
-        server_writer.shutdown().await?; // 保证发送 close_notify
-        Ok::<_, std::io::Error>(())
-    };
+            server_writer.shutdown().await?; // 保证发送 close_notify
+            Ok::<_, std::io::Error>(())
+        };
+        let server_to_client = async {
+            tokio::io::copy(&mut server_reader, &mut client_writer).await?;
+            client_writer.shutdown().await?; // 保证发送 close_notify
+            Ok::<_, std::io::Error>(())
+        };
 
-    let server_to_client = async {
-        tokio::io::copy(&mut server_reader, &mut client_writer).await?;
-        client_writer.shutdown().await?; // 保证发送 close_notify
-        Ok::<_, std::io::Error>(())
-    };
+        tokio::try_join!(client_to_server, server_to_client)?;
+    } else {
+        // 直接Copy流量并转发
+        let client_to_server = tokio::io::copy(&mut client_reader, &mut server_writer);
+        let server_to_client = tokio::io::copy(&mut server_reader, &mut client_writer);
 
-    tokio::try_join!(client_to_server, server_to_client)?;
+        tokio::try_join!(client_to_server, server_to_client)?;
+    }
+
 
     Ok(())
 }
