@@ -5,12 +5,16 @@ edition = "2024"
 
 [dependencies]
 hyper = { version = "1.6.0", features = ["full"] }
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1.45.1", features = ["full"] }
 clap = { version = "4.5.13", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
+rcgen = { version = "0.13.2", features = ["pem", "x509-parser"] }
+time = { version = "0.3.6", default-features = false }
+hyper-util = { version = "0.1", default-features = false, features = [
+    "server-auto",
+] }
 rustls = "0.23.27"
 tokio-rustls = "0.26.2"
-rcgen ={version = "0.13.2", features = ["pem", "x509-parser"] }
 hyper-rustls = "0.27.6"
 dialoguer = "0.11.0"
 env_logger = "0.11.5"
@@ -19,10 +23,6 @@ serde_yml = "0.0.12"
 anyhow = "1.0.0"
 rustls-pemfile = "2"
 http-body-util = "0.1"
-hyper-util = { version = "0.1", default-features = false, features = ["server-auto"] }
 pem = "3.0.2"
-time = { version = "0.3.6", default-features = false }
-x509-parser = { version = "0.17.0", features = ["verify"] }
 http = "1"
-pki-types = { package = "rustls-pki-types", version = "1" }
 webpki-roots = "1.0.0"
