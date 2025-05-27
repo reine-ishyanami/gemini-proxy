@@ -5,6 +5,8 @@ use rcgen::{
     SanType, date_time_ymd,
 };
 
+use log::info;
+
 // 颁发证书
 // 等价于：
 // openssl genrsa -out privatekey.pem 2048
@@ -12,6 +14,7 @@ use rcgen::{
 // openssl x509 -outform der -in certificate.pem -out certificate.der
 // openssl rsa -in privatekey.pem -outform der -out privatekey.der
 pub(crate) fn generate_ca() -> anyhow::Result<()> {
+    info!("生成证书中...");
     // 生成私钥
     let key_pair = KeyPair::generate()?; // 等价于 openssl genrsa
 
@@ -33,7 +36,7 @@ pub(crate) fn generate_ca() -> anyhow::Result<()> {
     // 设置为 CA 证书
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    params.extended_key_usages = vec![]; // CA 证书不应设置 extended key usages
+    params.extended_key_usages = vec![];
 
     // 生成自签名证书
     let cert = params.self_signed(&key_pair)?; // 等价于 openssl req -new -x509
@@ -55,20 +58,28 @@ pub(crate) fn generate_ca() -> anyhow::Result<()> {
     // 写入 DER 格式私钥
     fs::write("certs/privatekey.der", key_pair.serialize_der())?;
 
+    info!("CA 证书生成成功");
+
     Ok(())
 }
 
 // 安装证书
 pub(crate) fn install_ca() {
-    log::info!("安装证书中...");
+    info!("安装证书中...");
+    unimplemented!("实现证书安装功能");
 }
 
 // 卸载证书
 pub(crate) fn uninstall_ca() {
-    log::info!("卸载证书中...");
+    info!("卸载证书中...");
+    unimplemented!("实现证书卸载功能");
 }
 
 // 更新证书
 pub(crate) fn update_ca() {
-    log::info!("更新证书中...");
+    info!("更新证书中...");
+    uninstall_ca();
+    generate_ca().expect("生成 CA 证书失败");
+    install_ca();
+    info!("CA 证书已更新");
 }

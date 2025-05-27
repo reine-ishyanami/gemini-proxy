@@ -13,25 +13,52 @@ use rustls::{
 use std::{
     fs,
     net::{Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{atomic::AtomicI8, Arc},
 };
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use http::{Method, Request, Response, StatusCode};
+use log::{info, error};
+
+use crate::model::config::APP_CONFIG;
 
 type ClientBuilder = hyper::client::conn::http1::Builder;
 type ServerBuilder = hyper::server::conn::http1::Builder;
 
-/// 持有 CA 证书和缓存的中间证书
+static CURRENT_INDEX: AtomicI8 = AtomicI8::new(0);
+
+
+fn pick_key() -> Vec<u8> {
+    // 负载均衡：轮询选择 key
+    let total = APP_CONFIG.gemini.len() as i8;
+    if total == 0 {
+        error!("No Gemini API Key configured");
+        return b"".to_vec();
+    }
+    let index = CURRENT_INDEX.fetch_update(
+        std::sync::atomic::Ordering::SeqCst,
+        std::sync::atomic::Ordering::SeqCst,
+        |i| Some((i + 1) % total)
+    ).unwrap_or(0);
+    APP_CONFIG.gemini
+        .get(index as usize)
+        .map_or_else(
+            || {
+                error!("No Gemini API Key configured at index {index}");
+                b"".to_vec()
+            },
+            |config| config.key.as_bytes().to_vec(),
+        )
+}
 
 // 运行代理服务
 pub(crate) async fn run_service() -> anyhow::Result<()> {
     log::info!("代理服务运行中...");
     let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8443);
     let listener = TcpListener::bind(addr).await?;
-    println!("Listening on http://{addr}");
+    info!("Listening on http://{addr}");
 
     loop {
         let (stream, addr) = listener.accept().await?;
@@ -41,7 +68,7 @@ pub(crate) async fn run_service() -> anyhow::Result<()> {
                 .with_upgrades()
                 .await
             {
-                eprintln!("Failed to serve connection from {addr}: {err:?}");
+                error!("Failed to serve connection from {addr}: {err:?}");
             }
         });
     }
@@ -58,16 +85,20 @@ async fn proxy(req: Request<Incoming>) -> anyhow::Result<Response<BoxBody<Bytes,
                 match hyper::upgrade::on(req).await {
                     Ok(upgraded) => {
                         if let Err(e) = mitm_tunnel(upgraded, addr).await {
-                            eprintln!("MITM tunnel error: {e:?}");
+                            let msg = format!("{e}");
+                            if !msg.contains("peer closed connection without sending TLS close_notify") {
+                                error!("MITM tunnel error: {e:?}");
+                            }
+                            // 否则静默忽略
                         }
                     }
-                    Err(e) => eprintln!("Upgrade error: {e:?}"),
+                    Err(e) => error!("Upgrade error: {e:?}"),
                 }
             });
 
             Ok(resp)
         } else {
-            eprintln!("CONNECT host is not socket addr: {:?}", req.uri());
+            error!("CONNECT host is not socket addr: {:?}", req.uri());
             let mut resp = Response::new(full("CONNECT must be to a socket address"));
             *resp.status_mut() = http::StatusCode::BAD_REQUEST;
 
@@ -100,7 +131,7 @@ async fn proxy(req: Request<Incoming>) -> anyhow::Result<Response<BoxBody<Bytes,
             .await?;
         tokio::task::spawn(async move {
             if let Err(err) = conn.await {
-                println!("Connection failed: {err:?}");
+                error!("Connection failed: {err:?}");
             }
         });
 
@@ -156,7 +187,6 @@ async fn mitm_tunnel(upgraded: Upgraded, addr: String) -> anyhow::Result<()> {
         let mut buf = [0u8; 16 * 1024];
         loop {
             let n = client_reader.read(&mut buf).await?;
-            // println!("{}", String::from_utf8_lossy(&buf[..n]));
             if n == 0 {
                 break;
             }
@@ -170,7 +200,8 @@ async fn mitm_tunnel(upgraded: Upgraded, addr: String) -> anyhow::Result<()> {
                         j += 1;
                     }
                     // 将要替换的内容
-                    let replaced = b"114514".to_vec();
+                    let replaced = pick_key();
+                    info!("current key: {}", String::from_utf8_lossy(&replaced));
                     modified.splice(i + 4..j, replaced.iter().cloned());
                     i = i + 4 + replaced.len();
                 } else {
@@ -179,11 +210,15 @@ async fn mitm_tunnel(upgraded: Upgraded, addr: String) -> anyhow::Result<()> {
             }
             server_writer.write_all(&modified).await?;
         }
-        server_writer.shutdown().await?;
+        server_writer.shutdown().await?; // 保证发送 close_notify
         Ok::<_, std::io::Error>(())
     };
 
-    let server_to_client = tokio::io::copy(&mut server_reader, &mut client_writer);
+    let server_to_client = async {
+        tokio::io::copy(&mut server_reader, &mut client_writer).await?;
+        client_writer.shutdown().await?; // 保证发送 close_notify
+        Ok::<_, std::io::Error>(())
+    };
 
     tokio::try_join!(client_to_server, server_to_client)?;
 

@@ -1,13 +1,16 @@
 use clap::Parser;
 use command::{App, parse_command, parse_select};
+use model::config::APP_CONFIG;
 
 mod certificate;
 mod command;
 mod server;
+mod model;
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
+    APP_CONFIG.init_logger().expect("Failed to initialize logger");
+
     if let Ok(app) = App::try_parse() {
         parse_command(app.cmd).await;
     } else {
