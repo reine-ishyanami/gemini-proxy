@@ -17,6 +17,7 @@ use std::{
 };
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use http::{Method, Request, Response, StatusCode};
 
@@ -30,7 +31,7 @@ pub(crate) async fn run_service() -> anyhow::Result<()> {
     log::info!("代理服务运行中...");
     let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8443);
     let listener = TcpListener::bind(addr).await?;
-    println!("Listening on https://{addr}");
+    println!("Listening on http://{addr}");
 
     loop {
         let (stream, addr) = listener.accept().await?;
@@ -150,7 +151,38 @@ async fn mitm_tunnel(upgraded: Upgraded, addr: String) -> anyhow::Result<()> {
     let (mut client_reader, mut client_writer) = tokio::io::split(client_tls);
     let (mut server_reader, mut server_writer) = tokio::io::split(server_tls);
 
-    let client_to_server = tokio::io::copy(&mut client_reader, &mut server_writer);
+    // 篡改客户端发送过来的请求内容
+    let client_to_server = async {
+        let mut buf = [0u8; 16 * 1024];
+        loop {
+            let n = client_reader.read(&mut buf).await?;
+            // println!("{}", String::from_utf8_lossy(&buf[..n]));
+            if n == 0 {
+                break;
+            }
+            let mut modified = buf[..n].to_vec();
+            let mut i = 0;
+            while i + 4 < modified.len() {
+                if &modified[i..i + 4] == b"key=" {
+                    // 找到 key=，替换后面的内容
+                    let mut j = i + 4;
+                    while j < modified.len() && modified[j] != b'&' && modified[j] != b' ' && modified[j] != b'\r' && modified[j] != b'\n' {
+                        j += 1;
+                    }
+                    // 将要替换的内容
+                    let replaced = b"114514".to_vec();
+                    modified.splice(i + 4..j, replaced.iter().cloned());
+                    i = i + 4 + replaced.len();
+                } else {
+                    i += 1;
+                }
+            }
+            server_writer.write_all(&modified).await?;
+        }
+        server_writer.shutdown().await?;
+        Ok::<_, std::io::Error>(())
+    };
+
     let server_to_client = tokio::io::copy(&mut server_reader, &mut client_writer);
 
     tokio::try_join!(client_to_server, server_to_client)?;
