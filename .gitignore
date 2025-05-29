@@ -1,2 +1,4 @@
 /target
 /certs
+/logs
+app.yml

@@ -56,7 +56,7 @@ fn pick_key() -> Vec<u8> {
 // 运行代理服务
 pub(crate) async fn run_service() -> anyhow::Result<()> {
     log::info!("代理服务运行中...");
-    let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8443);
+    let addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 8443);
     let listener = TcpListener::bind(addr).await?;
     info!("Listening on http://{addr}");
 
@@ -184,6 +184,7 @@ async fn mitm_tunnel(upgraded: Upgraded, addr: String) -> anyhow::Result<()> {
     let (mut server_reader, mut server_writer) = tokio::io::split(server_tls);
 
     // 篡改客户端发送过来的请求内容
+    let end_flag = [b'\r', b'\n', b' ', b'&'];
     if &host == "generativelanguage.googleapis.com" {
         let client_to_server = async {
             let mut buf = [0u8; 16 * 1024];
@@ -198,7 +199,7 @@ async fn mitm_tunnel(upgraded: Upgraded, addr: String) -> anyhow::Result<()> {
                     if &modified[i..i + 4] == b"key=" {
                         // 找到 key=，替换后面的内容
                         let mut j = i + 4;
-                        while j < modified.len() && modified[j] != b'&' && modified[j] != b' ' && modified[j] != b'\r' && modified[j] != b'\n' {
+                        while j < modified.len() && !end_flag.contains(&modified[j]) {
                             j += 1;
                         }
                         // 将要替换的内容
