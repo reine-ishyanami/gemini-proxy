@@ -13,11 +13,11 @@ use rustls::{
 use std::{
     fs,
     net::{Ipv4Addr, SocketAddr},
-    sync::{atomic::AtomicI8, Arc},
+    sync::{Arc, atomic::AtomicI8},
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use http::{Method, Request, Response, StatusCode};
 use log::{debug, error, info};
@@ -29,7 +29,6 @@ type ServerBuilder = hyper::server::conn::http1::Builder;
 
 static CURRENT_INDEX: AtomicI8 = AtomicI8::new(0);
 
-
 fn pick_key() -> Vec<u8> {
     // 负载均衡：轮询选择 key
     let total = APP_CONFIG.gemini.len() as i8;
@@ -37,20 +36,20 @@ fn pick_key() -> Vec<u8> {
         error!("No Gemini API Key configured");
         return b"".to_vec();
     }
-    let index = CURRENT_INDEX.fetch_update(
-        std::sync::atomic::Ordering::SeqCst,
-        std::sync::atomic::Ordering::SeqCst,
-        |i| Some((i + 1) % total)
-    ).unwrap_or(0);
-    APP_CONFIG.gemini
-        .get(index as usize)
-        .map_or_else(
-            || {
-                error!("No Gemini API Key configured at index {index}");
-                b"".to_vec()
-            },
-            |config| config.key.as_bytes().to_vec(),
+    let index = CURRENT_INDEX
+        .fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |i| Some((i + 1) % total),
         )
+        .unwrap_or(0);
+    APP_CONFIG.gemini.get(index as usize).map_or_else(
+        || {
+            error!("No Gemini API Key configured at index {index}");
+            b"".to_vec()
+        },
+        |config| config.key.as_bytes().to_vec(),
+    )
 }
 
 // 运行代理服务
@@ -75,7 +74,7 @@ pub(crate) async fn run_service() -> anyhow::Result<()> {
 }
 
 async fn proxy(req: Request<Incoming>) -> anyhow::Result<Response<BoxBody<Bytes, hyper::Error>>> {
-    debug!("receive req {:?}", req);
+    debug!("receive req {req:?}");
     if Method::CONNECT == req.method() {
         if let Some(addr) = req.uri().authority().map(|auth| auth.to_string()) {
             // 立即返回一个成功的 Response
@@ -87,7 +86,9 @@ async fn proxy(req: Request<Incoming>) -> anyhow::Result<Response<BoxBody<Bytes,
                     Ok(upgraded) => {
                         if let Err(e) = mitm_tunnel(upgraded, addr).await {
                             let msg = format!("{e}");
-                            if !msg.contains("peer closed connection without sending TLS close_notify") {
+                            if !msg
+                                .contains("peer closed connection without sending TLS close_notify")
+                            {
                                 error!("MITM tunnel error: {e:?}");
                             }
                             // 否则静默忽略
@@ -107,14 +108,24 @@ async fn proxy(req: Request<Incoming>) -> anyhow::Result<Response<BoxBody<Bytes,
         }
     } else {
         // 普通 HTTP流量直接转发或自定义处理
-        let host = req.uri().host().map(|h| h.to_string()).expect("uri has no host");
+        let host = req
+            .uri()
+            .host()
+            .map(|h| h.to_string())
+            .expect("uri has no host");
         let port = req.uri().port_u16().unwrap_or(80);
         let mut req = req;
         let old_uri = req.uri();
         let need_rewrite = old_uri.scheme().is_some();
         if need_rewrite {
-            let path_and_query = old_uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-            let new_uri = http::Uri::builder().path_and_query(path_and_query).build().unwrap();
+            let path_and_query = old_uri
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/");
+            let new_uri = http::Uri::builder()
+                .path_and_query(path_and_query)
+                .build()
+                .unwrap();
             // 构造新 request，保留 method、headers、body、version
             let (parts, body) = req.into_parts();
             let mut new_parts = parts;
@@ -183,56 +194,73 @@ async fn mitm_tunnel(upgraded: Upgraded, addr: String) -> anyhow::Result<()> {
     let (mut client_reader, mut client_writer) = tokio::io::split(client_tls);
     let (mut server_reader, mut server_writer) = tokio::io::split(server_tls);
 
-    // 篡改客户端发送过来的请求内容
-    let end_flag = [b'\r', b'\n', b' ', b'&'];
     if &host == "generativelanguage.googleapis.com" {
-        let client_to_server = async {
-            let mut buf = [0u8; 16 * 1024];
-            loop {
-                let n = client_reader.read(&mut buf).await?;
-                if n == 0 {
-                    break;
-                }
-                let mut modified = buf[..n].to_vec();
-                let mut i = 0;
-                while i + 4 < modified.len() {
-                    if &modified[i..i + 4] == b"key=" {
-                        // 找到 key=，替换后面的内容
-                        let mut j = i + 4;
-                        while j < modified.len() && !end_flag.contains(&modified[j]) {
-                            j += 1;
-                        }
-                        // 将要替换的内容
-                        let replaced = pick_key();
-                        info!("current key: {}", String::from_utf8_lossy(&replaced));
-                        modified.splice(i + 4..j, replaced.iter().cloned());
-                        i = i + 4 + replaced.len();
-                    } else {
-                        i += 1;
-                    }
-                }
-                server_writer.write_all(&modified).await?;
-            }
-            server_writer.shutdown().await?; // 保证发送 close_notify
-            Ok::<_, std::io::Error>(())
-        };
-        let server_to_client = async {
-            tokio::io::copy(&mut server_reader, &mut client_writer).await?;
-            client_writer.shutdown().await?; // 保证发送 close_notify
-            Ok::<_, std::io::Error>(())
-        };
+        let client_to_server = client_to_server(&mut client_reader, &mut server_writer);
+        let server_to_client = server_to_client(&mut server_reader, &mut client_writer);
 
         tokio::try_join!(client_to_server, server_to_client)?;
     } else {
-        // 直接Copy流量并转发
         let client_to_server = tokio::io::copy(&mut client_reader, &mut server_writer);
         let server_to_client = tokio::io::copy(&mut server_reader, &mut client_writer);
 
         tokio::try_join!(client_to_server, server_to_client)?;
     }
 
-
     Ok(())
+}
+
+// 篡改客户端发送的请求内容
+async fn client_to_server<R, W>(
+    client_reader: &mut R,
+    server_writer: &mut W,
+) -> Result<(), std::io::Error>
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
+    let end_flag = [b'\r', b'\n', b' ', b'&'];
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let n = client_reader.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        let mut modified = buf[..n].to_vec();
+        let mut i = 0;
+        while i + 4 < modified.len() {
+            if &modified[i..i + 4] == b"key=" {
+                // 找到 key=，替换后面的内容
+                let mut j = i + 4;
+                while j < modified.len() && !end_flag.contains(&modified[j]) {
+                    j += 1;
+                }
+                // 将要替换的内容
+                let replaced = pick_key();
+                info!("current key: {}", String::from_utf8_lossy(&replaced));
+                modified.splice(i + 4..j, replaced.iter().cloned());
+                i = i + 4 + replaced.len();
+            } else {
+                i += 1;
+            }
+        }
+        server_writer.write_all(&modified).await?;
+    }
+    server_writer.shutdown().await?; // 保证发送 close_notify
+    Ok::<_, std::io::Error>(())
+}
+
+// 篡改服务端返回的响应内容
+async fn server_to_client<R, W>(
+    server_reader: &mut R,
+    client_writer: &mut W,
+) -> Result<(), std::io::Error>
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
+    tokio::io::copy(server_reader, client_writer).await?;
+    client_writer.shutdown().await?; // 保证发送 close_notify
+    Ok::<_, std::io::Error>(())
 }
 
 pub struct SignResult {

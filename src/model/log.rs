@@ -18,7 +18,7 @@ impl DailyFile {
             std::fs::create_dir_all(log_file_dir)?;
         }
         let date = Local::now().format("%Y-%m-%d").to_string();
-        let path = format!("{}/{}.log", base_path, date);
+        let path = format!("{base_path}/{date}.log");
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             base_path: base_path.to_string(),

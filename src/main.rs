@@ -4,12 +4,14 @@ use model::config::APP_CONFIG;
 
 mod certificate;
 mod command;
-mod server;
 mod model;
+mod server;
 
 #[tokio::main]
 async fn main() {
-    APP_CONFIG.init_logger().expect("Failed to initialize logger");
+    APP_CONFIG
+        .init_logger()
+        .expect("Failed to initialize logger");
 
     if let Ok(app) = App::try_parse() {
         parse_command(app.cmd).await;

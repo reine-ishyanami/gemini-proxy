@@ -16,11 +16,10 @@ fn init_config() -> anyhow::Result<AppConfig> {
         })
         .ok_or_else(|| anyhow::anyhow!("配置文件 app.yml/yaml 不存在"))?;
     if config.gemini.is_empty() {
-        return Err(anyhow::anyhow!("请至少配置一个 Gemini API Key"));        
+        return Err(anyhow::anyhow!("请至少配置一个 Gemini API Key"));
     }
     Ok(config)
 }
-
 
 #[derive(Debug, serde::Deserialize)]
 pub struct AppConfig {
