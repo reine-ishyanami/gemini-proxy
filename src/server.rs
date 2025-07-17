@@ -226,22 +226,35 @@ where
             break;
         }
         let mut modified = buf[..n].to_vec();
-        let mut i = 0;
-        while i + 4 < modified.len() {
-            if &modified[i..i + 4] == b"key=" {
-                // 找到 key=，替换后面的内容
-                let mut j = i + 4;
-                while j < modified.len() && !end_flag.contains(&modified[j]) {
-                    j += 1;
-                }
-                // 将要替换的内容
-                let replaced = pick_key();
-                info!("current key: {}", String::from_utf8_lossy(&replaced));
-                modified.splice(i + 4..j, replaced.iter().cloned());
-                i = i + 4 + replaced.len();
-            } else {
-                i += 1;
+        // 旧版为篡改 query 参数 key
+        let key_query = b"key=";
+        if let Some(pos) = modified.windows(key_query.len()).position(|window| window == key_query) {
+            // 找到 key= 的位置
+            let mut j = pos + key_query.len();
+            while j < modified.len() && !end_flag.contains(&modified[j]) {
+                j += 1;
             }
+            // 将要替换的内容
+            let replaced = pick_key();
+            info!("current key: {}", String::from_utf8_lossy(&replaced));
+            modified.splice(pos + key_query.len()..j, replaced.iter().cloned());
+        }
+
+        // 新版为篡改 header 参数 x-goog-api-key
+        let key_header = b"x-goog-api-key: ";
+        if let Some(pos) = modified
+            .windows(key_header.len())
+            .position(|window| window == key_header)
+        {
+            // 找到 x-goog-api-key: 的位置
+            let mut j = pos + key_header.len();
+            while j < modified.len() && !end_flag.contains(&modified[j]) {
+                j += 1;
+            }
+            // 将要替换的内容
+            let replaced = pick_key();
+            info!("current key: {}", String::from_utf8_lossy(&replaced));
+            modified.splice(pos + key_header.len()..j, replaced.iter().cloned());
         }
         server_writer.write_all(&modified).await?;
     }
